@@ -55,6 +55,10 @@ KEN_BURNS_INTENSITY   = float(os.getenv("KEN_BURNS_INTENSITY", 0.045))
 RENDER_QUALITY        = os.getenv("RENDER_QUALITY", "balanced")
 BACKGROUND_MUSIC      = os.getenv("BACKGROUND_MUSIC", "none")
 BACKGROUND_MUSIC_VOLUME = float(os.getenv("BACKGROUND_MUSIC_VOLUME", 0.08))
+COLOR_GRADE           = os.getenv("COLOR_GRADE", "cinematic_warm")  # cinematic_warm | cinematic_cool | documentary | none
+THUMBNAIL_BADGE       = os.getenv("THUMBNAIL_BADGE", "")  # Auto-detect if empty
+INTRO_ENABLED         = os.getenv("INTRO_ENABLED", "true").lower() not in ("0", "false", "no")
+OUTRO_ENABLED         = os.getenv("OUTRO_ENABLED", "true").lower() not in ("0", "false", "no")
 
 # ── Whisper ───────────────────────────────────────────────────────────────────
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
@@ -108,12 +112,16 @@ class PipelineState:
     gtts_tld:       str = GTTS_TLD
     subtitles_enabled: bool = SUBTITLES_ENABLED
     subtitle_font_size: int = SUBTITLE_FONT_SIZE
-    transition_style: str = TRANSITION_STYLE
+    transition_style: str = TRANSITION_STYLE  # crossfade | fade | none | slide_left | slide_right | wipe | zoom
     transition_duration: float = TRANSITION_DURATION
     ken_burns_intensity: float = KEN_BURNS_INTENSITY
     render_quality: str = RENDER_QUALITY  # preview | balanced | final
     background_music: str = BACKGROUND_MUSIC  # none | suspense | ambient | emotional
     background_music_volume: float = BACKGROUND_MUSIC_VOLUME
+    color_grade:      str = COLOR_GRADE       # cinematic_warm | cinematic_cool | documentary | none
+    thumbnail_badge:  str = THUMBNAIL_BADGE    # Auto-detect genre if empty
+    intro_enabled:    bool = INTRO_ENABLED
+    outro_enabled:    bool = OUTRO_ENABLED
 
     # Research
     research:       dict = field(default_factory=dict)
@@ -131,6 +139,7 @@ class PipelineState:
     video_path:     Optional[Path] = None   # raw video (no captions)
     captioned_path: Optional[Path] = None   # final with captions
     thumbnail_path: Optional[Path] = None
+    srt_path:       Optional[Path] = None   # soft SRT subtitle file
 
     # Upload results
     youtube_url:    str = ""

@@ -37,11 +37,15 @@ from agents import (
     agent_10_upload as upload_agent,
 )
 from core.config import (
+    COLOR_GRADE,
     IMAGE_COUNT,
     IMAGE_FIT_MODE,
     IMAGE_SOURCE,
+    INTRO_ENABLED,
     KEN_BURNS_INTENSITY,
+    OUTRO_ENABLED,
     OUTPUT_DIR,
+    THUMBNAIL_BADGE,
     BACKGROUND_MUSIC,
     BACKGROUND_MUSIC_VOLUME,
     RENDER_QUALITY,
@@ -96,6 +100,8 @@ def _print_summary(state: PipelineState, elapsed: float):
     print(f"  Scenes    : {len(state.scenes)}")
     print(f"  Video     : {state.captioned_path}")
     print(f"  Thumbnail : {state.thumbnail_path}")
+    if state.srt_path:
+        print(f"  SRT       : {state.srt_path}")
     if state.youtube_url:
         print(f"  YouTube   : {Fore.CYAN}{state.youtube_url}")
     if state.errors:
@@ -131,6 +137,10 @@ def create_state(
     render_quality: str = RENDER_QUALITY,
     background_music: str = BACKGROUND_MUSIC,
     background_music_volume: float = BACKGROUND_MUSIC_VOLUME,
+    color_grade: str = COLOR_GRADE,
+    thumbnail_badge: str = THUMBNAIL_BADGE,
+    intro_enabled: bool = INTRO_ENABLED,
+    outro_enabled: bool = OUTRO_ENABLED,
 ) -> PipelineState:
     return PipelineState(
         topic=topic,
@@ -157,6 +167,10 @@ def create_state(
         render_quality=render_quality,
         background_music=background_music,
         background_music_volume=background_music_volume,
+        color_grade=color_grade,
+        thumbnail_badge=thumbnail_badge,
+        intro_enabled=intro_enabled,
+        outro_enabled=outro_enabled,
     )
 
 
@@ -300,9 +314,13 @@ if __name__ == "__main__":
     parser.add_argument("--voice-name", default=VOICE_NAME)
     parser.add_argument("--no-subtitles", action="store_true", help="Skip burned subtitles")
     parser.add_argument("--subtitle-size", type=int, default=SUBTITLE_FONT_SIZE)
-    parser.add_argument("--transition", choices=["crossfade", "fade", "none"], default=TRANSITION_STYLE)
+    parser.add_argument("--transition", choices=["crossfade", "fade", "none", "slide_left", "slide_right", "wipe", "zoom"], default=TRANSITION_STYLE)
     parser.add_argument("--quality", choices=["preview", "balanced", "final"], default=RENDER_QUALITY)
     parser.add_argument("--music", choices=["none", "suspense", "ambient", "emotional"], default=BACKGROUND_MUSIC)
+    parser.add_argument("--color-grade", choices=["cinematic_warm", "cinematic_cool", "documentary", "none"], default=COLOR_GRADE)
+    parser.add_argument("--thumbnail-badge", default=THUMBNAIL_BADGE)
+    parser.add_argument("--no-intro", action="store_true", help="Skip intro title card")
+    parser.add_argument("--no-outro", action="store_true", help="Skip outro credits")
 
     args = parser.parse_args()
 
@@ -325,6 +343,10 @@ if __name__ == "__main__":
             transition_style=args.transition,
             render_quality=args.quality,
             background_music=args.music,
+            color_grade=args.color_grade,
+            thumbnail_badge=args.thumbnail_badge,
+            intro_enabled=not args.no_intro,
+            outro_enabled=not args.no_outro,
         )
     except Exception as exc:
         print(Fore.RED + f"Pipeline failed: {exc}")

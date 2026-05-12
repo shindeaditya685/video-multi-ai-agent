@@ -21,11 +21,13 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from core.config import (
+    COLOR_GRADE,
     IMAGE_COUNT,
     SCRIPT_LANGUAGE,
     SUBTITLE_FONT_SIZE,
     SUBTITLES_ENABLED,
     TEMP_DIR,
+    THUMBNAIL_BADGE,
     VIDEO_FPS,
     VIDEO_HEIGHT,
     VIDEO_WIDTH,
@@ -75,12 +77,16 @@ class DraftRequest(BaseModel):
     voice_pitch: str = Field("+0Hz", max_length=12)
     subtitles_enabled: bool = SUBTITLES_ENABLED
     subtitle_font_size: int = Field(SUBTITLE_FONT_SIZE, ge=12, le=48)
-    transition_style: str = Field("crossfade", pattern="^(crossfade|fade|none)$")
+    transition_style: str = Field("crossfade", pattern="^(crossfade|fade|none|slide_left|slide_right|wipe|zoom)$")
     transition_duration: float = Field(0.45, ge=0, le=2)
     ken_burns_intensity: float = Field(0.045, ge=0, le=0.12)
     render_quality: str = Field("balanced", pattern="^(preview|balanced|final)$")
     background_music: str = Field("none", pattern="^(none|suspense|ambient|emotional)$")
     background_music_volume: float = Field(0.08, ge=0, le=0.35)
+    color_grade: str = Field("cinematic_warm", pattern="^(cinematic_warm|cinematic_cool|documentary|none)$")
+    thumbnail_badge: str = Field("", max_length=80)
+    intro_enabled: bool = True
+    outro_enabled: bool = True
     upload_to_youtube: bool = False
 
 
@@ -113,12 +119,16 @@ class ConfirmRequest(BaseModel):
     voice_pitch: str = Field("+0Hz", max_length=12)
     subtitles_enabled: bool = SUBTITLES_ENABLED
     subtitle_font_size: int = Field(SUBTITLE_FONT_SIZE, ge=12, le=48)
-    transition_style: str = Field("crossfade", pattern="^(crossfade|fade|none)$")
+    transition_style: str = Field("crossfade", pattern="^(crossfade|fade|none|slide_left|slide_right|wipe|zoom)$")
     transition_duration: float = Field(0.45, ge=0, le=2)
     ken_burns_intensity: float = Field(0.045, ge=0, le=0.12)
     render_quality: str = Field("balanced", pattern="^(preview|balanced|final)$")
     background_music: str = Field("none", pattern="^(none|suspense|ambient|emotional)$")
     background_music_volume: float = Field(0.08, ge=0, le=0.35)
+    color_grade: str = Field("cinematic_warm", pattern="^(cinematic_warm|cinematic_cool|documentary|none)$")
+    thumbnail_badge: str = Field("", max_length=80)
+    intro_enabled: bool = True
+    outro_enabled: bool = True
     upload_to_youtube: bool = False
 
 
@@ -185,11 +195,16 @@ class JobStatus(BaseModel):
     render_quality: str = "balanced"
     background_music: str = "none"
     background_music_volume: float = 0.08
+    color_grade: str = "cinematic_warm"
+    thumbnail_badge: str = ""
+    intro_enabled: bool = True
+    outro_enabled: bool = True
     estimated_duration: float = 0
     uploaded_images: list[UploadedImagePayload] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
     video_url: str = ""
     thumbnail_url: str = ""
+    srt_url: str = ""
     youtube_url: str = ""
 
 
@@ -219,10 +234,13 @@ def _uploaded_payloads(state: PipelineState) -> list[UploadedImagePayload]:
 def _job_status(state: PipelineState) -> JobStatus:
     video_url = ""
     thumbnail_url = ""
+    srt_url = ""
     if state.captioned_path and Path(state.captioned_path).exists():
         video_url = f"/download/{state.job_id}"
     if state.thumbnail_path and Path(state.thumbnail_path).exists():
         thumbnail_url = f"/thumbnail/{state.job_id}"
+    if state.srt_path and Path(state.srt_path).exists():
+        srt_url = f"/srt/{state.job_id}"
 
     return JobStatus(
         job_id=state.job_id,
@@ -255,11 +273,16 @@ def _job_status(state: PipelineState) -> JobStatus:
         render_quality=state.render_quality,
         background_music=state.background_music,
         background_music_volume=state.background_music_volume,
+        color_grade=getattr(state, 'color_grade', 'cinematic_warm') or 'cinematic_warm',
+        thumbnail_badge=getattr(state, 'thumbnail_badge', '') or '',
+        intro_enabled=getattr(state, 'intro_enabled', True),
+        outro_enabled=getattr(state, 'outro_enabled', True),
         estimated_duration=sum(scene.duration for scene in state.scenes),
         uploaded_images=_uploaded_payloads(state),
         errors=state.errors,
         video_url=video_url,
         thumbnail_url=thumbnail_url,
+        srt_url=srt_url,
         youtube_url=state.youtube_url,
     )
 
@@ -300,6 +323,10 @@ def _make_state(req: DraftRequest, job_id: str) -> PipelineState:
         render_quality=req.render_quality,
         background_music=req.background_music,
         background_music_volume=req.background_music_volume,
+        color_grade=getattr(req, 'color_grade', 'cinematic_warm') or 'cinematic_warm',
+        thumbnail_badge=getattr(req, 'thumbnail_badge', '') or '',
+        intro_enabled=getattr(req, 'intro_enabled', True),
+        outro_enabled=getattr(req, 'outro_enabled', True),
         upload_to_youtube=req.upload_to_youtube,
     )
 
@@ -321,6 +348,10 @@ def _apply_render_settings(state: PipelineState, req: ConfirmRequest):
     state.render_quality = req.render_quality
     state.background_music = req.background_music
     state.background_music_volume = req.background_music_volume
+    state.color_grade = getattr(req, 'color_grade', 'cinematic_warm') or 'cinematic_warm'
+    state.thumbnail_badge = getattr(req, 'thumbnail_badge', '') or ''
+    state.intro_enabled = getattr(req, 'intro_enabled', True)
+    state.outro_enabled = getattr(req, 'outro_enabled', True)
     state.upload_to_youtube = req.upload_to_youtube
 
 
@@ -518,6 +549,10 @@ def import_project(project: ProjectPayload):
         render_quality=settings.get("render_quality", "balanced"),
         background_music=settings.get("background_music", "none"),
         background_music_volume=float(settings.get("background_music_volume", 0.08)),
+        color_grade=settings.get("color_grade", "cinematic_warm"),
+        thumbnail_badge=settings.get("thumbnail_badge", ""),
+        intro_enabled=bool(settings.get("intro_enabled", True)),
+        outro_enabled=bool(settings.get("outro_enabled", True)),
     )
     state.title = project.title
     state.hook = project.hook
@@ -613,6 +648,24 @@ def thumbnail(job_id: str):
     if not state or not state.thumbnail_path or not Path(state.thumbnail_path).exists():
         raise HTTPException(status_code=404, detail="Thumbnail not ready yet")
     return FileResponse(path=str(state.thumbnail_path), media_type="image/png")
+
+
+@app.get("/srt/{job_id}")
+def srt_download(job_id: str):
+    """Download the soft SRT subtitle file for a job."""
+    state = JOBS.get(job_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Job not found")
+    srt_path = state.srt_path or OUTPUT_DIR / f"{job_id}_subtitles.srt"
+    if not srt_path.exists():
+        raise HTTPException(status_code=404, detail="SRT file not available yet")
+    name = state.title or state.topic or job_id
+    name = re.sub(r"[^a-zA-Z0-9._ -]+", "", name).strip()[:60]
+    return FileResponse(
+        path=str(srt_path),
+        media_type="text/plain",
+        filename=f"{name or job_id}.srt",
+    )
 
 
 @app.websocket("/ws/{job_id}")
