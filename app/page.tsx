@@ -33,7 +33,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000"
 type ImageSource = "ai" | "upload";
 type ImageFitMode = "contain_blur" | "cover";
 type VoiceProvider = "edge" | "gtts";
-type TransitionStyle = "crossfade" | "fade" | "none";
+type TransitionStyle = "crossfade" | "fade" | "none" | "slide_left" | "slide_right" | "wipe" | "zoom";
 type ScriptLanguage = "en" | "hi" | "mr";
 
 type ScenePayload = {
@@ -800,6 +800,10 @@ export default function StudioPage() {
           <select id="transition" value={transitionStyle} onChange={(e) => setTransitionStyle(e.target.value as TransitionStyle)}>
             <option value="crossfade">Crossfade</option>
             <option value="fade">Fade</option>
+            <option value="slide_left">Slide left</option>
+            <option value="slide_right">Slide right</option>
+            <option value="wipe">Wipe</option>
+            <option value="zoom">Zoom</option>
             <option value="none">None</option>
           </select>
 

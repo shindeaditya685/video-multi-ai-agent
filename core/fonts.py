@@ -208,8 +208,16 @@ def ensure_devanagari_font() -> Path:
     """
     cache = _font_cache_dir()
 
-    # Check if we already have a cached font
-    for fname in ["NotoSansDevanagari-Regular.ttf", "NotoSans-Regular.ttf"]:
+    # Check if we already have a cached/project font. The repo ships variable
+    # Noto Devanagari and Nirmala fonts, so prefer them before going online.
+    for fname in [
+        "NotoSansDevanagari-Regular.ttf",
+        "NotoSansDevanagari-VF.ttf",
+        "Nirmala.ttc",
+        "Mangal.ttf",
+        "NotoSans-Regular.ttf",
+        "NotoSans-VF.ttf",
+    ]:
         cached = cache / fname
         if cached.exists() and cached.stat().st_size > 1000:
             return cached
@@ -256,7 +264,13 @@ def ensure_devanagari_font_bold() -> Path:
     cache = _font_cache_dir()
 
     # Check cache
-    for fname in ["NotoSansDevanagari-Bold.ttf"]:
+    for fname in [
+        "NotoSansDevanagari-Bold.ttf",
+        "NotoSansDevanagari-VF.ttf",
+        "Nirmalab.ttf",
+        "Nirmala.ttc",
+        "Mangal.ttf",
+    ]:
         cached = cache / fname
         if cached.exists() and cached.stat().st_size > 1000:
             return cached
@@ -363,7 +377,16 @@ def get_ffmpeg_font_dir() -> str:
     # Check cached/downloaded font first
     cache = _font_cache_dir()
     # Check if any TTF files exist in the cache
-    for fname in ["NotoSansDevanagari-Regular.ttf", "NotoSans-Regular.ttf", "Mangal.ttf"]:
+    for fname in [
+        "NotoSansDevanagari-Regular.ttf",
+        "NotoSansDevanagari-Bold.ttf",
+        "NotoSansDevanagari-VF.ttf",
+        "Nirmala.ttc",
+        "Nirmala.ttf",
+        "Mangal.ttf",
+        "NotoSans-Regular.ttf",
+        "NotoSans-VF.ttf",
+    ]:
         if (cache / fname).exists():
             return str(cache)
 
@@ -383,12 +406,18 @@ def get_ffmpeg_font_name(language: str = "en") -> str:
     if language in ("hi", "mr"):
         # Check if we have a cached/downloaded font
         cache = _font_cache_dir()
-        if (cache / "NotoSansDevanagari-Regular.ttf").exists():
-            return "NotoSansDevanagari-Regular"
-        if (cache / "NotoSans-Regular.ttf").exists():
-            return "NotoSans-Regular"
+        if (cache / "Nirmala.ttc").exists() or (cache / "Nirmala.ttf").exists():
+            return "Nirmala UI"
+        if (
+            (cache / "NotoSansDevanagari-Regular.ttf").exists()
+            or (cache / "NotoSansDevanagari-Bold.ttf").exists()
+            or (cache / "NotoSansDevanagari-VF.ttf").exists()
+        ):
+            return "Noto Sans Devanagari"
         if (cache / "Mangal.ttf").exists():
             return "Mangal"
+        if (cache / "NotoSans-Regular.ttf").exists() or (cache / "NotoSans-VF.ttf").exists():
+            return "Noto Sans"
 
         # System fonts
         if sys.platform == "win32" or os.name == "nt":

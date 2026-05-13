@@ -32,6 +32,9 @@ Rules:
 - Scenes should flow cinematically — each one leads to the next
 - Vary pacing: some short (4s) for impact, some longer (8s) for atmosphere
 - Visuals should be CINEMATIC — think documentary B-roll, not literal
+- Build edit variety: cold-open image, evidence details, location wides,
+  slow push-ins, empty rooms, archival-style cutaways, and reflective close-ups
+- Avoid repeating the same visual composition in consecutive scenes
 
 Return ONLY a JSON array:
 [

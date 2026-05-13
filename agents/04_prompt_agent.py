@@ -23,6 +23,9 @@ Prompt style rules:
 - Include: lighting, mood, camera angle, time of day
 - Style suffix: "cinematic documentary photography, realistic, 4K, moody lighting"
 - Avoid: faces of real people, names, text in image, graphic violence
+- Vary shot type across scenes: establishing wide, over-the-shoulder,
+  evidence macro, empty corridor, silhouette, newspaper archive, courtroom detail
+- Favor authentic Indian locations and textures when the case is India-specific
 - Keep each prompt under 75 words
 - Make it visual, not narrative
 

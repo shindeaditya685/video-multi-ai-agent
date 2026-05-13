@@ -21,14 +21,22 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
 
+from core.fonts import ensure_devanagari_font, find_ffmpeg_binary, get_ffmpeg_font_dir, get_ffmpeg_font_name
+from core.subtitles import scene_subtitle_cues
 from core.config import PipelineState, OUTPUT_DIR, TEMP_DIR, VIDEO_FPS, WHISPER_MODEL
 
-FFMPEG_BIN = str(Path("C:/ffmpeg/bin/ffmpeg.exe")) if Path("C:/ffmpeg/bin/ffmpeg.exe").exists() else "ffmpeg"
-FFPROBE_BIN = str(Path("C:/ffmpeg/bin/ffprobe.exe")) if Path("C:/ffmpeg/bin/ffprobe.exe").exists() else "ffprobe"
+FFMPEG_BIN = find_ffmpeg_binary()
+_ffmpeg_path = Path(FFMPEG_BIN)
+if _ffmpeg_path.name.lower().startswith("ffmpeg"):
+    _ffprobe_candidate = _ffmpeg_path.with_name("ffprobe.exe" if os.name == "nt" else "ffprobe")
+else:
+    _ffprobe_candidate = Path("C:/ffmpeg/bin/ffprobe.exe")
+FFPROBE_BIN = str(_ffprobe_candidate) if _ffprobe_candidate.exists() else "ffprobe"
 
 # Map script_language to Whisper language codes
 WHISPER_LANG_MAP = {
@@ -82,6 +90,17 @@ def _get_audio_duration(audio_path: Path) -> float:
         return 6.0
 
 
+def _ffmpeg_filter_path(path: Path | str) -> str:
+    value = str(Path(path).resolve()).replace("\\", "/")
+    value = value.replace(":", r"\:")
+    value = value.replace("'", r"\\'")
+    return value
+
+
+def _quote_filter_value(value: str) -> str:
+    return f"'{value}'"
+
+
 # ── Generate scene-based SRT without Whisper ───────────────────────────────
 
 def generate_scene_srt(state: PipelineState, job_dir: Path, time_offset: float = 0.0) -> Path:
@@ -102,6 +121,7 @@ def generate_scene_srt(state: PipelineState, job_dir: Path, time_offset: float =
     t = time_offset  # Start after intro if present
     idx = 1
 
+    language = getattr(state, "script_language", "en") or "en"
     for scene in state.scenes:
         # Use actual audio duration for accurate timing
         if scene.audio_path and scene.audio_path.exists():
@@ -109,21 +129,17 @@ def generate_scene_srt(state: PipelineState, job_dir: Path, time_offset: float =
         else:
             duration = scene.duration
 
-        start = _seconds_to_srt_time(t)
-        end = _seconds_to_srt_time(t + duration)
-        text = scene.narration.strip()
-
-        if text:
+        for cue in scene_subtitle_cues(scene.narration, t, duration, language=language):
             lines.append(f"{idx}")
-            lines.append(f"{start} --> {end}")
-            lines.append(text)
+            lines.append(f"{_seconds_to_srt_time(cue.start)} --> {_seconds_to_srt_time(cue.end)}")
+            lines.append(cue.text)
             lines.append("")
             idx += 1
 
         t += duration
 
     srt_path.write_text("\n".join(lines), encoding="utf-8")
-    print(f"    Scene SRT: {idx - 1} segments generated (correct Devanagari text, no Whisper)")
+    print(f"    Scene SRT: {idx - 1} readable cues generated (correct Devanagari text, no Whisper)")
     return srt_path
 
 
@@ -182,7 +198,23 @@ def _find_devanagari_font() -> tuple[str, str]:
     Find the best Devanagari-capable font for FFmpeg subtitle rendering.
     Returns (font_name, fontsdir_or_empty).
     """
-    # Try Linux font directories
+    font_path = ensure_devanagari_font()
+    font_dir = get_ffmpeg_font_dir()
+    font_name = get_ffmpeg_font_name("hi")
+
+    if font_path and font_path.exists():
+        lower_name = font_path.name.lower()
+        if lower_name.startswith("notosansdevanagari"):
+            font_name = "Noto Sans Devanagari"
+        elif "nirmala" in lower_name:
+            font_name = "Nirmala UI"
+        elif "mangal" in lower_name:
+            font_name = "Mangal"
+        font_dir = font_dir or str(font_path.parent)
+        print(f"    Subtitle font: {font_name} ({font_path.name})")
+        return font_name, font_dir
+
+    # Last-resort system scans keep Linux containers working if the cache is empty.
     for d in _DEVANAGARI_FONT_DIRS:
         if os.path.isdir(d):
             if os.path.isfile(os.path.join(d, "FreeSans.ttf")):
@@ -190,18 +222,16 @@ def _find_devanagari_font() -> tuple[str, str]:
             if os.path.isfile(os.path.join(d, "DejaVuSans.ttf")):
                 return "DejaVu Sans", d
 
-    # Windows: try built-in Devanagari fonts
     for fname, fpath in _WINDOWS_DEVANAGARI_FONTS.items():
         if os.path.isfile(fpath):
-            print(f"    Subtitle font: {fname} (dir: {os.path.dirname(fpath)})")
             return fname, os.path.dirname(fpath)
 
-    return "FreeSans", ""
+    return font_name or "Noto Sans Devanagari", font_dir
 
 
 def burn_subtitles(video_path: Path, srt_path: Path, output_path: Path,
                    font_size: int = 18, quality_crf: str = "20",
-                   language: str = "en") -> Path:
+                   language: str = "en", preset: str = "veryfast") -> Path:
     """
     Burn subtitles into the video using FFmpeg with multiple fallback methods.
     
@@ -211,8 +241,9 @@ def burn_subtitles(video_path: Path, srt_path: Path, output_path: Path,
     3. If that fails, try simple subtitles filter (no custom styling)
     4. If all fail, copy video without burned subtitles
     """
-    # Escape path for FFmpeg subtitle filter (Windows backslashes + colon drive letters)
-    srt_str = str(srt_path).replace("\\", "/").replace(":", "\\:")
+    # Escape paths for FFmpeg filter syntax. Windows drive-letter colons
+    # otherwise get parsed as option separators.
+    srt_str = _ffmpeg_filter_path(srt_path)
 
     if language in ("hi", "mr"):
         font_name, fontsdir = _find_devanagari_font()
@@ -220,37 +251,33 @@ def burn_subtitles(video_path: Path, srt_path: Path, output_path: Path,
         font_name = "Arial"
         fontsdir = ""
 
+    style = (
+        f"Fontname={font_name},"
+        f"Fontsize={font_size},"
+        "PrimaryColour=&H00FFFFFF,"
+        "OutlineColour=&H00000000,"
+        "BackColour=&H80000000,"
+        "BorderStyle=1,"
+        "Outline=2,"
+        "Shadow=0,"
+        "MarginV=34,"
+        "Alignment=2,"
+        "Encoding=1"
+    )
+
     # ── Method 1: Styled subtitles filter ─────────────────────────────────
     if fontsdir:
         subtitle_filter = (
-            f"subtitles='{srt_str}':"
-            f"fontsdir={fontsdir}:"
-            "force_style='"
-            f"Fontname={font_name},"
-            f"Fontsize={font_size},"
-            "PrimaryColour=&H00FFFFFF,"
-            "OutlineColour=&H00000000,"
-            "BackColour=&H80000000,"
-            "BorderStyle=4,"
-            "Outline=1,"
-            "Shadow=0,"
-            "MarginV=25,"
-            "Alignment=2'"
+            f"subtitles=filename={_quote_filter_value(srt_str)}:"
+            f"fontsdir={_quote_filter_value(_ffmpeg_filter_path(fontsdir))}:"
+            "charenc=UTF-8:"
+            f"force_style={_quote_filter_value(style)}"
         )
     else:
         subtitle_filter = (
-            f"subtitles='{srt_str}':"
-            "force_style='"
-            f"Fontname={font_name},"
-            f"Fontsize={font_size},"
-            "PrimaryColour=&H00FFFFFF,"
-            "OutlineColour=&H00000000,"
-            "BackColour=&H80000000,"
-            "BorderStyle=4,"
-            "Outline=1,"
-            "Shadow=0,"
-            "MarginV=25,"
-            "Alignment=2'"
+            f"subtitles=filename={_quote_filter_value(srt_str)}:"
+            "charenc=UTF-8:"
+            f"force_style={_quote_filter_value(style)}"
         )
 
     cmd = [
@@ -259,13 +286,13 @@ def burn_subtitles(video_path: Path, srt_path: Path, output_path: Path,
         "-vf", subtitle_filter,
         "-c:v", "libx264",
         "-crf", quality_crf,
-        "-preset", "fast",
+        "-preset", preset,
         "-c:a", "copy",
         "-movflags", "+faststart",
         str(output_path),
     ]
 
-    print(f"    Using Devanagari font: {font_name}")
+    print(f"    Using subtitle font: {font_name}")
     result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
     if result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 1000:
@@ -285,15 +312,22 @@ def burn_subtitles(video_path: Path, srt_path: Path, output_path: Path,
     # ── Method 2: Convert SRT to ASS and burn (better Unicode/Devanagari) ──
     try:
         ass_path = _srt_to_ass(srt_path, font_name, font_size, language)
-        ass_str = str(ass_path).replace("\\", "/").replace(":", "\\:")
+        ass_str = _ffmpeg_filter_path(ass_path)
+        if fontsdir:
+            ass_filter = (
+                f"ass=filename={_quote_filter_value(ass_str)}:"
+                f"fontsdir={_quote_filter_value(_ffmpeg_filter_path(fontsdir))}"
+            )
+        else:
+            ass_filter = f"ass=filename={_quote_filter_value(ass_str)}"
         
         cmd2 = [
             FFMPEG_BIN, "-y",
             "-i", str(video_path),
-            "-vf", f"ass='{ass_str}'",
+            "-vf", ass_filter,
             "-c:v", "libx264",
             "-crf", quality_crf,
-            "-preset", "fast",
+            "-preset", preset,
             "-c:a", "copy",
             "-movflags", "+faststart",
             str(output_path),
@@ -315,14 +349,14 @@ def burn_subtitles(video_path: Path, srt_path: Path, output_path: Path,
         print(f"    Method 2 (ASS subtitles) skipped: {e}")
 
     # ── Method 3: Simple subtitles filter (no custom styling) ──────────────
-    simple_filter = f"subtitles='{srt_str}'"
+    simple_filter = f"subtitles=filename={_quote_filter_value(srt_str)}:charenc=UTF-8"
     cmd3 = [
         FFMPEG_BIN, "-y",
         "-i", str(video_path),
         "-vf", simple_filter,
         "-c:v", "libx264",
         "-crf", quality_crf,
-        "-preset", "fast",
+        "-preset", preset,
         "-c:a", "copy",
         "-movflags", "+faststart",
         str(output_path),
@@ -401,7 +435,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font_name},{int(font_size * 2.5)},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,4,2,0,2,10,10,30,1
+Style: Default,{font_name},{int(font_size * 2.4)},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,0,2,28,28,36,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -409,10 +443,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     
     # Parse SRT entries
     events = []
-    blocks = srt_content.strip().split("\n\n")
+    blocks = re.split(r"\r?\n\r?\n", srt_content.strip())
     
     for block in blocks:
-        lines = block.strip().split("\n")
+        lines = [line.rstrip("\r") for line in block.strip().splitlines()]
         if len(lines) < 3:
             continue
         
@@ -432,8 +466,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         text_lines = []
         for line in lines:
             if "-->" not in line and not line.strip().isdigit():
-                text_lines.append(line.strip())
-        text = "\\N".join(text_lines)  # \N is ASS line break
+                safe_line = line.strip().replace("\\", "\\\\").replace("{", r"\{").replace("}", r"\}")
+                text_lines.append(safe_line)
+        text = "\\N".join(text_lines)
         
         if text:
             events.append(f"Dialogue: 0,{start_time},{end_time},Default,,0,0,0,,{text}")
@@ -574,6 +609,7 @@ def run(state: PipelineState) -> PipelineState:
             srt_src = job_dir / "subtitles_scene.srt"
             if srt_src.exists():
                 shutil.copy(srt_src, srt_export_path)
+                state.srt_path = srt_export_path
                 print(f"    Soft SRT available: {srt_export_path.name}")
         except Exception as e:
             print(f"    Soft SRT generation skipped: {e}")
@@ -651,12 +687,26 @@ def run(state: PipelineState) -> PipelineState:
 
     # ── Burn subtitles into video ─────────────────────────────────────────
     print(f"    Burning subtitles into video ({used_method})...")
-    burn_subtitles(state.video_path, srt_path, out_path,
-                   font_size=state.subtitle_font_size, language=language)
+    quality = (state.render_quality or "balanced").lower()
+    subtitle_quality = {
+        "preview": ("28", "veryfast"),
+        "balanced": ("23", "veryfast"),
+        "final": ("19", "fast"),
+    }.get(quality, ("23", "veryfast"))
+    burn_subtitles(
+        state.video_path,
+        srt_path,
+        out_path,
+        font_size=state.subtitle_font_size,
+        quality_crf=subtitle_quality[0],
+        language=language,
+        preset=subtitle_quality[1],
+    )
 
     # Copy soft SRT to output for download
     try:
         shutil.copy(srt_path, srt_export_path)
+        state.srt_path = srt_export_path
         print(f"    Soft SRT available: {srt_export_path.name}")
     except Exception:
         pass

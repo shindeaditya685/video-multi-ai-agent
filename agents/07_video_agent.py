@@ -15,9 +15,12 @@ Improvements over original:
 from __future__ import annotations
 
 import math
+import os
 import numpy as np
 from pathlib import Path
 
+from core.fonts import get_pil_font
+from core.subtitles import scene_subtitle_cues
 from core.config import (
     OUTPUT_DIR,
     TEMP_DIR,
@@ -463,33 +466,7 @@ def _get_pil_font(size: int, bold: bool = False):
     and common scripts. Tries multiple paths for cross-platform support.
     FreeSans/FreeSansBold have the broadest Unicode coverage including Devanagari.
     """
-    from PIL import ImageFont
-    candidates = [
-        # Linux - FreeSans (best Devanagari support)
-        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf" if bold else "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
-        # Linux - DejaVu (good fallback)
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        # Linux - Liberation
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        # Linux - Noto
-        "/usr/share/fonts/truetype/noto-serif-sc/NotoSerifSC-Bold.ttf" if bold else "/usr/share/fonts/truetype/noto-serif-sc/NotoSerifSC-Regular.ttf",
-        # macOS
-        "/System/Library/Fonts/Helvetica.ttc",
-        # Windows - Noto Sans (if installed, supports Devanagari)
-        "C:/Windows/Fonts/NotoSans-Bold.ttf" if bold else "C:/Windows/Fonts/NotoSans-Regular.ttf",
-        # Windows - Arial Unicode MS (if installed)
-        "C:/Windows/Fonts/Arialuni.ttf",
-        # Windows - Mangal (Windows built-in Devanagari font)
-        "C:/Windows/Fonts/Mangal.ttf",
-        # Windows - Arial (Latin only, last resort)
-        "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
-    ]
-    for path in candidates:
-        try:
-            return ImageFont.truetype(path, size)
-        except (IOError, OSError):
-            continue
-    return ImageFont.load_default()
+    return get_pil_font(size, bold=bold)
 
 
 def _get_ffmpeg_font_dir() -> str:
@@ -790,6 +767,35 @@ def _make_outro_clip(
     return clip
 
 
+def _make_documentary_overlay(width: int, height: int):
+    from PIL import Image, ImageDraw
+
+    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    if width >= height:
+        bar_h = max(10, int(height * 0.045))
+        draw.rectangle([0, 0, width, bar_h], fill=(0, 0, 0, 205))
+        draw.rectangle([0, height - bar_h, width, height], fill=(0, 0, 0, 205))
+
+    y, x = np.ogrid[-1:1:height * 1j, -1:1:width * 1j]
+    distance = np.sqrt(x * x + y * y)
+    alpha = np.clip((distance - 0.52) / 0.55, 0, 1) * 90
+    vignette = np.zeros((height, width, 4), dtype=np.uint8)
+    vignette[..., 3] = alpha.astype(np.uint8)
+    return Image.alpha_composite(overlay, Image.fromarray(vignette, "RGBA"))
+
+
+def _apply_documentary_finish(video_clip, width: int, height: int):
+    _, _, _, CompositeVideoClip, ImageClip, _, _, _, _ = _moviepy_symbols()
+    overlay_img = _make_documentary_overlay(width, height)
+    overlay_clip = _with_duration(ImageClip(np.array(overlay_img)), video_clip.duration)
+    finished = CompositeVideoClip([video_clip, overlay_clip], size=(width, height))
+    if getattr(video_clip, "audio", None):
+        finished = _with_audio(finished, video_clip.audio)
+    return finished
+
+
 # ── Scene Clip Builder ─────────────────────────────────────────────────────
 
 def _get_audio_duration(audio_path: Path) -> float:
@@ -863,7 +869,9 @@ def _export_srt(state: PipelineState, output_path: Path, time_offset: float = 0.
     """
     lines = []
     t = time_offset
-    for i, scene in enumerate(state.scenes):
+    language = getattr(state, "script_language", "en") or "en"
+    cue_idx = 1
+    for scene in state.scenes:
         # Use actual audio duration if available, else scene duration
         duration = scene.duration
         if scene.audio_path and scene.audio_path.exists():
@@ -873,10 +881,6 @@ def _export_srt(state: PipelineState, output_path: Path, time_offset: float = 0.
             except Exception:
                 pass
 
-        start = t
-        end = t + duration
-
-        # SRT timestamp format
         def fmt(secs):
             h = int(secs // 3600)
             m = int((secs % 3600) // 60)
@@ -884,15 +888,17 @@ def _export_srt(state: PipelineState, output_path: Path, time_offset: float = 0.
             ms = int((secs % 1) * 1000)
             return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
-        lines.append(f"{i + 1}")
-        lines.append(f"{fmt(start)} --> {fmt(end)}")
-        lines.append(scene.narration.strip())
-        lines.append("")
+        for cue in scene_subtitle_cues(scene.narration, t, duration, language=language):
+            lines.append(f"{cue_idx}")
+            lines.append(f"{fmt(cue.start)} --> {fmt(cue.end)}")
+            lines.append(cue.text)
+            lines.append("")
+            cue_idx += 1
 
-        t = end
+        t += duration
 
     output_path.write_text("\n".join(lines), encoding="utf-8")
-    print(f"    SRT exported: {output_path.name} ({len(state.scenes)} segments)")
+    print(f"    SRT exported: {output_path.name} ({cue_idx - 1} cues)")
     return output_path
 
 
@@ -917,10 +923,11 @@ def run(state: PipelineState) -> PipelineState:
     quality = (state.render_quality or "balanced").lower()
     quality_settings = {
         "preview": {"crf": "30", "preset": "veryfast", "fps": min(fps, 18)},
-        "balanced": {"crf": "23", "preset": "medium", "fps": fps},
-        "final": {"crf": "18", "preset": "slow", "fps": fps},
+        "balanced": {"crf": "24", "preset": "fast", "fps": fps},
+        "final": {"crf": "18", "preset": "medium", "fps": fps},
     }[quality if quality in ("preview", "balanced", "final") else "balanced"]
     fps = int(quality_settings["fps"])
+    render_threads = max(1, min((os.cpu_count() or 4), 8))
 
     # Build scene clips with enhanced features
     clips = []
@@ -939,40 +946,46 @@ def run(state: PipelineState) -> PipelineState:
 
     # Add intro title card (with script_language for Devanagari support)
     script_language = getattr(state, "script_language", "en") or "en"
-    try:
-        print("    Adding intro title card...")
-        intro = _make_intro_clip(
-            state.title, state.hook, width, height, fps,
-            duration=4.0, script_language=script_language,
-        )
-        intro_with_blank_audio = _with_audio(intro, _make_music_bed(
-            state.background_music or "ambient",
-            intro.duration,
-            float(state.background_music_volume or 0.08) * 0.5,
-        ) or _moviepy_symbols()[0](
-            lambda t: np.zeros((2,)), duration=intro.duration, fps=44100
-        ))
-        final = concatenate_videoclips([intro_with_blank_audio, final], method="compose")
-    except Exception as e:
-        print(f"    Intro skipped: {e}")
+    if getattr(state, "intro_enabled", True):
+        try:
+            print("    Adding intro title card...")
+            intro = _make_intro_clip(
+                state.title, state.hook, width, height, fps,
+                duration=4.0, script_language=script_language,
+            )
+            intro_with_blank_audio = _with_audio(intro, _make_music_bed(
+                state.background_music or "ambient",
+                intro.duration,
+                float(state.background_music_volume or 0.08) * 0.5,
+            ) or _moviepy_symbols()[0](
+                lambda t: np.zeros((2,)), duration=intro.duration, fps=44100
+            ))
+            final = concatenate_videoclips([intro_with_blank_audio, final], method="compose")
+        except Exception as e:
+            print(f"    Intro skipped: {e}")
+    else:
+        print("    Intro skipped: disabled")
 
     # Add outro credits (visually distinct from intro)
-    try:
-        print("    Adding outro credits...")
-        outro = _make_outro_clip(
-            state.title, width, height, fps,
-            duration=3.0, script_language=script_language,
-        )
-        outro_audio = _make_music_bed(
-            state.background_music or "ambient",
-            outro.duration,
-            float(state.background_music_volume or 0.08) * 0.3,
-        )
-        if outro_audio:
-            outro = _with_audio(outro, outro_audio)
-        final = concatenate_videoclips([final, outro], method="compose")
-    except Exception as e:
-        print(f"    Outro skipped: {e}")
+    if getattr(state, "outro_enabled", True):
+        try:
+            print("    Adding outro credits...")
+            outro = _make_outro_clip(
+                state.title, width, height, fps,
+                duration=3.0, script_language=script_language,
+            )
+            outro_audio = _make_music_bed(
+                state.background_music or "ambient",
+                outro.duration,
+                float(state.background_music_volume or 0.08) * 0.3,
+            )
+            if outro_audio:
+                outro = _with_audio(outro, outro_audio)
+            final = concatenate_videoclips([final, outro], method="compose")
+        except Exception as e:
+            print(f"    Outro skipped: {e}")
+    else:
+        print("    Outro skipped: disabled")
 
     # Add background music bed
     final = _with_music_bed(
@@ -980,6 +993,7 @@ def run(state: PipelineState) -> PipelineState:
         state.background_music or "none",
         float(state.background_music_volume or 0),
     )
+    final = _apply_documentary_finish(final, width, height)
 
     video_path = OUTPUT_DIR / f"{state.job_id}_raw.mp4"
     state.video_path = video_path
@@ -990,10 +1004,11 @@ def run(state: PipelineState) -> PipelineState:
         fps=fps,
         codec="libx264",
         audio_codec="aac",
-        temp_audiofile=str(OUTPUT_DIR / "tmp_audio.m4a"),
+        temp_audiofile=str(OUTPUT_DIR / f"{state.job_id}_tmp_audio.m4a"),
         remove_temp=True,
         preset=quality_settings["preset"],
         ffmpeg_params=["-crf", quality_settings["crf"], "-pix_fmt", "yuv420p"],
+        threads=render_threads,
         logger=None,
     )
 
